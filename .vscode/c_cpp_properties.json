@@ -10,6 +10,8 @@
             "includePath": [
                 "C:/Users/gomih/air-analyzer/include",
                 "C:/Users/gomih/air-analyzer/src",
+                "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
+                "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                 "C:/Users/gomih/air-analyzer/.pio/libdeps/esp32dev/ESP32Encoder/src",
                 "C:/Users/gomih/air-analyzer/.pio/libdeps/esp32dev/Sensirion I2C SCD4x/src",
                 "C:/Users/gomih/air-analyzer/.pio/libdeps/esp32dev/Sensirion Core/src",
@@ -233,7 +235,6 @@
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/Insights/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/NetBIOS/src",
-                "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/RainMaker/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/SD/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/SD_MMC/src",
@@ -243,7 +244,6 @@
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/USB/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/Update/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
-                "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                 "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
                 ""
@@ -253,6 +253,8 @@
                 "path": [
                     "C:/Users/gomih/air-analyzer/include",
                     "C:/Users/gomih/air-analyzer/src",
+                    "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
+                    "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                     "C:/Users/gomih/air-analyzer/.pio/libdeps/esp32dev/ESP32Encoder/src",
                     "C:/Users/gomih/air-analyzer/.pio/libdeps/esp32dev/Sensirion I2C SCD4x/src",
                     "C:/Users/gomih/air-analyzer/.pio/libdeps/esp32dev/Sensirion Core/src",
@@ -476,7 +478,6 @@
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/Insights/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/NetBIOS/src",
-                    "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/Preferences/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/RainMaker/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/SD/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/SD_MMC/src",
@@ -486,7 +487,6 @@
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/USB/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/Update/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
-                    "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src",
                     "C:/Users/gomih/.platformio/packages/framework-arduinoespressif32/libraries/WiFiProv/src",
                     ""

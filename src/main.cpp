@@ -33,11 +33,10 @@ constexpr uint16_t CO2_MODERATE_MAX_PPM = 1000;
 constexpr uint16_t CO2_HIGH_MAX_PPM = 1500;
 constexpr uint16_t CO2_MAX_PPM = 2000;
 constexpr uint32_t DISPLAY_UPDATE_INTERVAL_MS = 10000;
-constexpr uint32_t HISTORY_VERSION = 2;
+constexpr uint32_t HISTORY_VERSION = 3;
 constexpr size_t HISTORY_CAPACITY = 25;
 constexpr time_t HISTORY_WINDOW_SECONDS = 24 * 60 * 60;
 constexpr int ENCODER_COUNTS_PER_STEP = 1;
-constexpr uint32_t HISTORY_PAGE_UPDATE_INTERVAL_MS = 10000;
 constexpr uint32_t SENSOR_POLL_INTERVAL_MS = 250;
 constexpr uint32_t SYSTEM_PAGE_UPDATE_INTERVAL_MS = 1000;
 
@@ -47,6 +46,22 @@ struct HourlySample {
     int64_t minimumEpoch;
     uint16_t maximumCo2;
     int64_t maximumEpoch;
+    bool minimumOverLimit;
+    bool maximumOverLimit;
+};
+
+struct HourlySampleV2 {
+    int64_t hourStartEpoch;
+    uint16_t minimumCo2;
+    int64_t minimumEpoch;
+    uint16_t maximumCo2;
+    int64_t maximumEpoch;
+};
+
+struct HistoryDataV2 {
+    uint32_t version;
+    uint8_t count;
+    HourlySampleV2 samples[HISTORY_CAPACITY];
 };
 
 struct ActiveHour {
@@ -56,6 +71,8 @@ struct ActiveHour {
     uint16_t maximumCo2;
     int64_t maximumEpoch;
     bool valid;
+    bool minimumOverLimit;
+    bool maximumOverLimit;
 };
 
 struct HistoryData {
@@ -73,13 +90,13 @@ ActiveHour activeHour = {};
 uint16_t backgroundColor = BLUE_GRAY;
 uint32_t lastDisplayUpdateMs = 0;
 uint32_t lastClockUpdateMs = 0;
-uint32_t lastHistoryPageUpdateMs = 0;
 uint32_t lastSystemPageUpdateMs = 0;
 uint32_t lastSensorPollMs = 0;
 uint32_t cpuWindowStartMs = 0;
 uint8_t appLoadPercent = 0;
 uint64_t cpuWindowBusyMicros = 0;
 bool systemPageNeedsFullUpdate = true;
+bool historyPageNeedsFullUpdate = true;
 int64_t lastEncoderCount = 0;
 int encoderCountRemainder = 0;
 uint8_t currentPage = 0;
@@ -92,7 +109,24 @@ int gaugeMarkerY;
 float gaugeMarkerAngle;
 bool gaugeMarkerVisible = false;
 
+struct HistoryDisplayCache {
+    bool valid;
+    uint16_t minimumCo2;
+    int64_t minimumEpoch;
+    bool minimumOverLimit;
+    uint16_t maximumCo2;
+    int64_t maximumEpoch;
+    bool maximumOverLimit;
+};
+
+HistoryDisplayCache historyDisplayCache = {};
+int8_t historyPageDisplayState = -1;
+
 void showCurrentPage();
+
+uint16_t limitCo2(uint16_t co2) {
+    return co2 > CO2_MAX_PPM ? CO2_MAX_PPM : co2;
+}
 
 const bool digits[10][7] = {
     {1,1,1,1,1,1,0},
@@ -265,18 +299,24 @@ void updateDisplay(
     drawGaugeMarker(co2);
 
     // CO2 value
-    int value = min((int)co2, 9999);
+    int value = limitCo2(co2);
+    bool overLimit = co2 > CO2_MAX_PPM;
 
     char buffer[5];
     snprintf(buffer, sizeof(buffer), "%04d", value);
 
     static char previousCo2Digits[5] = "";
+    static bool previousCo2OverLimit = false;
+    bool co2LimitStateChanged = overLimit != previousCo2OverLimit;
 
     for (int i = 0; i < 4; i++) {
-        if (force || buffer[i] != previousCo2Digits[i]) {
-            drawDigit(52 + i * 25, 66, buffer[i] - '0', WHITE);
+        if (force || co2LimitStateChanged || buffer[i] != previousCo2Digits[i]) {
+            drawDigit(52 + i * 25, 66, buffer[i] - '0', overLimit ? RED : WHITE);
             previousCo2Digits[i] = buffer[i];
         }
+    }
+    if (force || co2LimitStateChanged) {
+        previousCo2OverLimit = overLimit;
     }
 
     // Temperature
@@ -358,16 +398,41 @@ bool connectWifiAndSyncTime() {
 }
 
 void loadHistory() {
+    history = {};
     history.version = HISTORY_VERSION;
     if (!preferences.begin("air-history", true)) {
         return;
     }
 
-    if (preferences.getBytesLength("hourly") == sizeof(history)) {
+    size_t storedLength = preferences.getBytesLength("hourly");
+    if (storedLength == sizeof(history)) {
         preferences.getBytes("hourly", &history, sizeof(history));
         if (history.version != HISTORY_VERSION || history.count > HISTORY_CAPACITY) {
             history = {};
             history.version = HISTORY_VERSION;
+        } else {
+            for (uint8_t i = 0; i < history.count; i++) {
+                history.samples[i].minimumCo2 = limitCo2(history.samples[i].minimumCo2);
+                history.samples[i].maximumCo2 = limitCo2(history.samples[i].maximumCo2);
+            }
+        }
+    } else if (storedLength == sizeof(HistoryDataV2)) {
+        HistoryDataV2 previousHistory = {};
+        preferences.getBytes("hourly", &previousHistory, sizeof(previousHistory));
+        if (previousHistory.version == 2 && previousHistory.count <= HISTORY_CAPACITY) {
+            history.count = previousHistory.count;
+            for (uint8_t i = 0; i < history.count; i++) {
+                const HourlySampleV2& previousSample = previousHistory.samples[i];
+                history.samples[i] = {
+                    previousSample.hourStartEpoch,
+                    limitCo2(previousSample.minimumCo2),
+                    previousSample.minimumEpoch,
+                    limitCo2(previousSample.maximumCo2),
+                    previousSample.maximumEpoch,
+                    previousSample.minimumCo2 > CO2_MAX_PPM,
+                    previousSample.maximumCo2 > CO2_MAX_PPM
+                };
+            }
         }
     }
     preferences.end();
@@ -389,6 +454,10 @@ void pruneHistory(time_t now) {
 
 void saveHistory() {
     history.version = HISTORY_VERSION;
+    for (uint8_t i = 0; i < history.count; i++) {
+        history.samples[i].minimumCo2 = limitCo2(history.samples[i].minimumCo2);
+        history.samples[i].maximumCo2 = limitCo2(history.samples[i].maximumCo2);
+    }
     if (preferences.begin("air-history", false)) {
         preferences.putBytes("hourly", &history, sizeof(history));
         preferences.end();
@@ -413,7 +482,9 @@ void commitActiveHour(time_t now) {
         activeHour.minimumCo2,
         activeHour.minimumEpoch,
         activeHour.maximumCo2,
-        activeHour.maximumEpoch
+        activeHour.maximumEpoch,
+        activeHour.minimumOverLimit,
+        activeHour.maximumOverLimit
     };
     saveHistory();
 }
@@ -422,6 +493,8 @@ void recordHourlyCo2(uint16_t co2, time_t now) {
     if (!isTimeValid()) {
         return;
     }
+    bool overLimit = co2 > CO2_MAX_PPM;
+    co2 = limitCo2(co2);
 
     int64_t hourStartEpoch = ((int64_t)now / 3600) * 3600;
     if (activeHour.valid && activeHour.hourStartEpoch != hourStartEpoch) {
@@ -437,17 +510,23 @@ void recordHourlyCo2(uint16_t co2, time_t now) {
         activeHour.minimumEpoch = now;
         activeHour.maximumCo2 = co2;
         activeHour.maximumEpoch = now;
+        activeHour.minimumOverLimit = overLimit;
+        activeHour.maximumOverLimit = overLimit;
         activeHour.valid = true;
         return;
     }
 
-    if (co2 < activeHour.minimumCo2) {
+    if (co2 < activeHour.minimumCo2 ||
+        (co2 == activeHour.minimumCo2 && activeHour.minimumOverLimit && !overLimit)) {
         activeHour.minimumCo2 = co2;
         activeHour.minimumEpoch = now;
+        activeHour.minimumOverLimit = overLimit;
     }
-    if (co2 > activeHour.maximumCo2) {
+    if (co2 > activeHour.maximumCo2 ||
+        (co2 == activeHour.maximumCo2 && overLimit && !activeHour.maximumOverLimit)) {
         activeHour.maximumCo2 = co2;
         activeHour.maximumEpoch = now;
+        activeHour.maximumOverLimit = overLimit;
     }
 }
 
@@ -463,36 +542,60 @@ void printSampleTime(int x, int y, int64_t epoch) {
     tft.print(timeText);
 }
 
-void drawHistoryStat(const char* label, int labelY, int valueY,
-    int timeY, int unitY, uint16_t co2, int64_t timestamp) {
-    tft.setTextColor(GRAY, backgroundColor);
-    tft.setTextSize(1);
-    tft.setCursor(42, labelY);
-    tft.print(label);
-    tft.setTextColor(label[0] == 'M' && label[1] == 'A' ? RED : CYAN, backgroundColor);
+void drawHistoryStat(int valueY, int timeY, uint16_t co2,
+    bool overLimit, int64_t timestamp, uint16_t color) {
+    tft.fillRect(40, valueY, 105, 26, backgroundColor);
+    tft.setTextColor(overLimit ? RED : color, backgroundColor);
     tft.setTextSize(3);
     tft.setCursor(42, valueY);
+    if (overLimit) {
+        tft.print(">");
+    }
     tft.print(co2);
-    tft.setTextColor(GRAY, backgroundColor);
-    tft.setTextSize(1);
-    tft.setCursor(42, unitY);
-    tft.print("ppm");
+    tft.fillRect(140, timeY - 2, 172, 22, backgroundColor);
     printSampleTime(144, timeY, timestamp);
 }
 
 void drawHistoryPage() {
-    tft.fillScreen(backgroundColor);
-    tft.drawRoundRect(5, 5, 310, 160, 9, GREEN);
-    tft.setTextColor(WHITE, backgroundColor);
-    tft.setTextSize(2);
-    tft.setCursor(91, 23);
-    tft.print("CO2 / 24H");
+    if (historyPageNeedsFullUpdate) {
+        tft.fillScreen(backgroundColor);
+        tft.drawRoundRect(5, 5, 310, 160, 9, GREEN);
+        tft.setTextColor(WHITE, backgroundColor);
+        tft.setTextSize(2);
+        tft.setCursor(91, 23);
+        tft.print("CO2 / 24H");
 
-    if (!isTimeValid()) {
         tft.setTextColor(GRAY, backgroundColor);
         tft.setTextSize(1);
-        tft.setCursor(87, 82);
-        tft.print("WAITING FOR TIME");
+        tft.setCursor(42, 43);
+        tft.print("MINIMUM");
+        tft.setCursor(42, 98);
+        tft.print("MAXIMUM");
+        tft.setCursor(42, 87);
+        tft.print("ppm");
+        tft.setCursor(42, 142);
+        tft.print("ppm");
+
+        historyPageNeedsFullUpdate = false;
+        historyDisplayCache.valid = false;
+        historyPageDisplayState = -1;
+    }
+
+    if (!isTimeValid()) {
+        if (historyPageDisplayState != 0) {
+            if (historyPageDisplayState == 2) {
+                tft.fillRect(40, 61, 105, 26, backgroundColor);
+                tft.fillRect(40, 116, 105, 26, backgroundColor);
+                tft.fillRect(140, 66, 172, 22, backgroundColor);
+                tft.fillRect(140, 121, 172, 22, backgroundColor);
+            }
+            tft.fillRect(75, 78, 180, 18, backgroundColor);
+            tft.setTextColor(GRAY, backgroundColor);
+            tft.setTextSize(1);
+            tft.setCursor(87, 82);
+            tft.print("WAITING FOR TIME");
+            historyPageDisplayState = 0;
+        }
         return;
     }
 
@@ -501,43 +604,86 @@ void drawHistoryPage() {
     uint16_t maximumCo2 = 0;
     int64_t minimumEpoch = 0;
     int64_t maximumEpoch = 0;
+    bool minimumOverLimit = false;
+    bool maximumOverLimit = false;
     bool foundSample = false;
     int64_t oldestEpoch = (int64_t)now - HISTORY_WINDOW_SECONDS;
-    auto considerExtreme = [&](uint16_t co2, int64_t epoch) {
+    auto considerExtreme = [&](uint16_t co2, int64_t epoch, bool overLimit) {
         if (epoch < oldestEpoch || epoch > now) {
             return;
         }
-        if (!foundSample || co2 < minimumCo2) {
+        if (!foundSample || co2 < minimumCo2 ||
+            (co2 == minimumCo2 && minimumOverLimit && !overLimit)) {
             minimumCo2 = co2;
             minimumEpoch = epoch;
+            minimumOverLimit = overLimit;
         }
-        if (!foundSample || co2 > maximumCo2) {
+        if (!foundSample || co2 > maximumCo2 ||
+            (co2 == maximumCo2 && overLimit && !maximumOverLimit)) {
             maximumCo2 = co2;
             maximumEpoch = epoch;
+            maximumOverLimit = overLimit;
         }
         foundSample = true;
     };
 
     for (uint8_t i = 0; i < history.count; i++) {
         const HourlySample& sample = history.samples[i];
-        considerExtreme(sample.minimumCo2, sample.minimumEpoch);
-        considerExtreme(sample.maximumCo2, sample.maximumEpoch);
+        considerExtreme(sample.minimumCo2, sample.minimumEpoch, sample.minimumOverLimit);
+        considerExtreme(sample.maximumCo2, sample.maximumEpoch, sample.maximumOverLimit);
     }
     if (activeHour.valid) {
-        considerExtreme(activeHour.minimumCo2, activeHour.minimumEpoch);
-        considerExtreme(activeHour.maximumCo2, activeHour.maximumEpoch);
+        considerExtreme(activeHour.minimumCo2, activeHour.minimumEpoch,
+            activeHour.minimumOverLimit);
+        considerExtreme(activeHour.maximumCo2, activeHour.maximumEpoch,
+            activeHour.maximumOverLimit);
     }
 
     if (!foundSample) {
-        tft.setTextColor(GRAY, backgroundColor);
-        tft.setTextSize(1);
-        tft.setCursor(92, 82);
-        tft.print("NO SAMPLES YET");
+        if (historyPageDisplayState != 1) {
+            if (historyPageDisplayState == 2) {
+                tft.fillRect(40, 61, 105, 26, backgroundColor);
+                tft.fillRect(40, 116, 105, 26, backgroundColor);
+                tft.fillRect(140, 66, 172, 22, backgroundColor);
+                tft.fillRect(140, 121, 172, 22, backgroundColor);
+            }
+            tft.fillRect(75, 78, 180, 18, backgroundColor);
+            tft.setTextColor(GRAY, backgroundColor);
+            tft.setTextSize(1);
+            tft.setCursor(92, 82);
+            tft.print("NO SAMPLES YET");
+            historyPageDisplayState = 1;
+        }
         return;
     }
 
-    drawHistoryStat("MINIMUM", 43, 61, 68, 87, minimumCo2, minimumEpoch);
-    drawHistoryStat("MAXIMUM", 98, 116, 123, 142, maximumCo2, maximumEpoch);
+    bool redrawMinimum = historyPageDisplayState != 2 || !historyDisplayCache.valid ||
+        minimumCo2 != historyDisplayCache.minimumCo2 ||
+        minimumOverLimit != historyDisplayCache.minimumOverLimit ||
+        minimumEpoch != historyDisplayCache.minimumEpoch;
+    bool redrawMaximum = historyPageDisplayState != 2 || !historyDisplayCache.valid ||
+        maximumCo2 != historyDisplayCache.maximumCo2 ||
+        maximumOverLimit != historyDisplayCache.maximumOverLimit ||
+        maximumEpoch != historyDisplayCache.maximumEpoch;
+
+    if (historyPageDisplayState != 2) {
+        tft.fillRect(75, 78, 180, 18, backgroundColor);
+    }
+    if (redrawMinimum) {
+        drawHistoryStat(61, 68, minimumCo2, minimumOverLimit, minimumEpoch, CYAN);
+    }
+    if (redrawMaximum) {
+        drawHistoryStat(116, 123, maximumCo2, maximumOverLimit, maximumEpoch, RED);
+    }
+
+    historyDisplayCache.minimumCo2 = minimumCo2;
+    historyDisplayCache.minimumEpoch = minimumEpoch;
+    historyDisplayCache.minimumOverLimit = minimumOverLimit;
+    historyDisplayCache.maximumCo2 = maximumCo2;
+    historyDisplayCache.maximumEpoch = maximumEpoch;
+    historyDisplayCache.maximumOverLimit = maximumOverLimit;
+    historyDisplayCache.valid = true;
+    historyPageDisplayState = 2;
 }
 
 void drawClockPage() {
@@ -690,6 +836,9 @@ void updateSystemPage() {
 
 void showCurrentPage() {
     gaugeMarkerVisible = false;
+    if (currentPage != 1) {
+        historyPageNeedsFullUpdate = true;
+    }
     if (currentPage == 0) {
         drawInterface();
         if (hasSensorReading) {
@@ -698,7 +847,6 @@ void showCurrentPage() {
         lastDisplayUpdateMs = millis();
     } else if (currentPage == 1) {
         drawHistoryPage();
-        lastHistoryPageUpdateMs = millis();
     } else if (currentPage == 2) {
         drawClockPage();
         updateClockPage();
@@ -820,11 +968,6 @@ void loop(){
         updateClockPage();
         lastClockUpdateMs = now;
     }
-    if (currentPage == 1 && now - lastHistoryPageUpdateMs >= HISTORY_PAGE_UPDATE_INTERVAL_MS) {
-        drawHistoryPage();
-        lastHistoryPageUpdateMs = now;
-    }
-
     if (now - lastSensorPollMs >= SENSOR_POLL_INTERVAL_MS) {
         lastSensorPollMs = now;
         uint16_t co2;

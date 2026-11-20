@@ -39,6 +39,8 @@ constexpr time_t HISTORY_WINDOW_SECONDS = 24 * 60 * 60;
 constexpr int ENCODER_COUNTS_PER_STEP = 1;
 constexpr uint32_t SENSOR_POLL_INTERVAL_MS = 250;
 constexpr uint32_t SYSTEM_PAGE_UPDATE_INTERVAL_MS = 1000;
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 15000;
+constexpr uint32_t NTP_RETRY_INTERVAL_MS = 30000;
 
 struct HourlySample {
     int64_t hourStartEpoch;
@@ -92,11 +94,14 @@ uint32_t lastDisplayUpdateMs = 0;
 uint32_t lastClockUpdateMs = 0;
 uint32_t lastSystemPageUpdateMs = 0;
 uint32_t lastSensorPollMs = 0;
+uint32_t lastWifiAttemptMs = 0;
+uint32_t lastNtpAttemptMs = 0;
 uint32_t cpuWindowStartMs = 0;
 uint8_t appLoadPercent = 0;
 uint64_t cpuWindowBusyMicros = 0;
 bool systemPageNeedsFullUpdate = true;
 bool historyPageNeedsFullUpdate = true;
+bool ntpAttempted = false;
 int64_t lastEncoderCount = 0;
 int encoderCountRemainder = 0;
 uint8_t currentPage = 0;
@@ -353,48 +358,33 @@ bool isTimeValid() {
     return time(nullptr) >= 1704067200;
 }
 
-bool connectWifiAndSyncTime() {
-    Serial.println("Wi-Fi: connecting...");
+void startWifi() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
+    Serial.println("Wi-Fi: connecting...");
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    lastWifiAttemptMs = millis();
+}
 
-    uint32_t wifiStartMs = millis();
-    uint32_t lastWifiLogMs = wifiStartMs;
-    while (WiFi.status() != WL_CONNECTED && millis() - wifiStartMs < 15000) {
-        delay(250);
-        if (millis() - lastWifiLogMs >= 1000) {
-            Serial.print("Wi-Fi: waiting (");
-            Serial.print((millis() - wifiStartMs) / 1000);
-            Serial.println(" s)");
-            lastWifiLogMs = millis();
-        }
-    }
-
+void maintainWifiAndTime() {
+    uint32_t now = millis();
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Wi-Fi: connection timed out");
-        return false;
+        if (now - lastWifiAttemptMs >= WIFI_RETRY_INTERVAL_MS) {
+            Serial.println("Wi-Fi: retrying connection...");
+            WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+            lastWifiAttemptMs = now;
+        }
+        return;
     }
 
-    Serial.print("Wi-Fi: connected, IP=");
-    Serial.print(WiFi.localIP());
-    Serial.print(", RSSI=");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
-    Serial.println("NTP: requesting Kyiv time synchronization...");
-    configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4",
-        "pool.ntp.org", "time.google.com", "time.cloudflare.com");
-
-    uint32_t timeStartMs = millis();
-    while (!isTimeValid() && millis() - timeStartMs < 10000) {
-        delay(250);
+    if (!isTimeValid() &&
+        (!ntpAttempted || now - lastNtpAttemptMs >= NTP_RETRY_INTERVAL_MS)) {
+        Serial.println("NTP: requesting Kyiv time synchronization...");
+        configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4",
+            "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+        lastNtpAttemptMs = now;
+        ntpAttempted = true;
     }
-    if (isTimeValid()) {
-        Serial.println("NTP: local clock is valid");
-    } else {
-        Serial.println("NTP: synchronization timed out");
-    }
-    return true;
 }
 
 void loadHistory() {
@@ -581,25 +571,27 @@ void drawHistoryPage() {
         historyPageDisplayState = -1;
     }
 
-    if (!isTimeValid()) {
-        if (historyPageDisplayState != 0) {
-            if (historyPageDisplayState == 2) {
-                tft.fillRect(40, 61, 105, 26, backgroundColor);
-                tft.fillRect(40, 116, 105, 26, backgroundColor);
-                tft.fillRect(140, 66, 172, 22, backgroundColor);
-                tft.fillRect(140, 121, 172, 22, backgroundColor);
+    bool currentTimeValid = isTimeValid();
+    int64_t referenceEpoch = currentTimeValid ? (int64_t)time(nullptr) : 0;
+    if (!currentTimeValid) {
+        for (uint8_t i = 0; i < history.count; i++) {
+            const HourlySample& sample = history.samples[i];
+            if (sample.minimumEpoch > referenceEpoch) {
+                referenceEpoch = sample.minimumEpoch;
             }
-            tft.fillRect(75, 78, 180, 18, backgroundColor);
-            tft.setTextColor(GRAY, backgroundColor);
-            tft.setTextSize(1);
-            tft.setCursor(87, 82);
-            tft.print("WAITING FOR TIME");
-            historyPageDisplayState = 0;
+            if (sample.maximumEpoch > referenceEpoch) {
+                referenceEpoch = sample.maximumEpoch;
+            }
         }
-        return;
+        if (activeHour.valid) {
+            if (activeHour.minimumEpoch > referenceEpoch) {
+                referenceEpoch = activeHour.minimumEpoch;
+            }
+            if (activeHour.maximumEpoch > referenceEpoch) {
+                referenceEpoch = activeHour.maximumEpoch;
+            }
+        }
     }
-
-    time_t now = time(nullptr);
     uint16_t minimumCo2 = 0;
     uint16_t maximumCo2 = 0;
     int64_t minimumEpoch = 0;
@@ -607,9 +599,9 @@ void drawHistoryPage() {
     bool minimumOverLimit = false;
     bool maximumOverLimit = false;
     bool foundSample = false;
-    int64_t oldestEpoch = (int64_t)now - HISTORY_WINDOW_SECONDS;
+    int64_t oldestEpoch = referenceEpoch - HISTORY_WINDOW_SECONDS;
     auto considerExtreme = [&](uint16_t co2, int64_t epoch, bool overLimit) {
-        if (epoch < oldestEpoch || epoch > now) {
+        if (epoch < oldestEpoch || epoch > referenceEpoch) {
             return;
         }
         if (!foundSample || co2 < minimumCo2 ||
@@ -922,7 +914,7 @@ void setup() {
     lastEncoderCount = encoder.getCount();
 
     loadHistory();
-    connectWifiAndSyncTime();
+    startWifi();
 
   Wire.begin(21, 22); // Initialize I2C with SDA on GPIO 21 and SCL on GPIO 22
   scd4x.begin(Wire, 0x62); // Initialize the SCD4x sensor with I2C address 0x62
@@ -961,7 +953,15 @@ void setup() {
 
 void loop(){
     uint64_t loopStartMicros = esp_timer_get_time();
+    maintainWifiAndTime();
     updateEncoderPage();
+
+    static bool previousTimeValid = false;
+    bool timeValid = isTimeValid();
+    if (timeValid && !previousTimeValid && currentPage == 1) {
+        drawHistoryPage();
+    }
+    previousTimeValid = timeValid;
 
     uint32_t now = millis();
     if (currentPage == 2 && now - lastClockUpdateMs >= 1000) {
